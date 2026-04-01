@@ -22,6 +22,16 @@ COCO_CLASSES = [
     "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
 ]
 
+# TensorFlow Hub Faster R-CNN outputs original COCO category IDs (1-90 with gaps).
+# Map those sparse IDs to class names to avoid index shifts / IndexError.
+COCO_CATEGORY_IDS = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    27, 28, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52,
+    53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79,
+    80, 81, 82, 84, 85, 86, 87, 88, 89, 90
+]
+COCO_ID_TO_LABEL = dict(zip(COCO_CATEGORY_IDS, COCO_CLASSES))
+
 # Function to perform object detection
 def detect_objects(image_path, model, threshold=0.5):
     # Debug message to verify the file path
@@ -44,19 +54,19 @@ def detect_objects(image_path, model, threshold=0.5):
 
     # Extract detection results
     boxes = detections['detection_boxes'][0].numpy()  # Bounding boxes
-    class_indices = detections['detection_classes'][0].numpy().astype(int) - 1  # Class indices, -1 to adjust for zero-indexed
+    class_ids = detections['detection_classes'][0].numpy().astype(int)  # Raw sparse COCO category IDs
     scores = detections['detection_scores'][0].numpy()  # Confidence scores
 
     # Filter out detections below the confidence threshold
-    valid_detections = scores >= threshold
+    valid_detections = (scores >= threshold) & np.isin(class_ids, COCO_CATEGORY_IDS)
     boxes = boxes[valid_detections]
-    class_indices = class_indices[valid_detections]
+    class_labels = np.array([COCO_ID_TO_LABEL[class_id] for class_id in class_ids[valid_detections]])
     scores = scores[valid_detections]
 
-    return image_rgb, boxes, class_indices, scores
+    return image_rgb, boxes, class_labels, scores
 
 # Function to display the image with detected bounding boxes
-def display_image_with_detections(image, boxes, class_indices, scores, threshold=0.5):
+def display_image_with_detections(image, boxes, class_labels, scores, threshold=0.5):
     height, width, _ = image.shape
     for i, box in enumerate(boxes):
         if scores[i] >= threshold:
@@ -67,7 +77,7 @@ def display_image_with_detections(image, boxes, class_indices, scores, threshold
             cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
 
             # Display label and confidence
-            label = f"{COCO_CLASSES[class_indices[i]]}: {scores[i]:.2f}"
+            label = f"{class_labels[i]}: {scores[i]:.2f}"
             cv2.putText(image, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
     # Show the result with matplotlib
