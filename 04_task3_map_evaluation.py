@@ -21,12 +21,10 @@ SCORE_THRESHOLD = 0.05
 
 
 class COCODetectionDataset(Dataset):
-    def __init__(self, images_dir, annotations_file, transforms):
+    def __init__(self, images_dir, coco, transforms, category_id_map):
         self.images_dir = Path(images_dir)
         self.transforms = transforms
-
-        with open(annotations_file, "r", encoding="utf-8") as f:
-            coco = json.load(f)
+        self.category_id_map = category_id_map
 
         self.images = sorted(coco["images"], key=lambda x: x["id"])
 
@@ -52,7 +50,10 @@ class COCODetectionDataset(Dataset):
         for ann in anns:
             x, y, w, h = ann["bbox"]
             boxes.append([x, y, x + w, y + h])
-            labels.append(ann["category_id"])
+            raw_category_id = ann["category_id"]
+            if raw_category_id not in self.category_id_map:
+                raise KeyError(f"Unknown category_id {raw_category_id} in annotation for image_id={image_info['id']}")
+            labels.append(self.category_id_map[raw_category_id])
             areas.append(ann.get("area", w * h))
             iscrowd.append(ann.get("iscrowd", 0))
 
@@ -66,6 +67,40 @@ class COCODetectionDataset(Dataset):
 
         image_tensor = self.transforms(image)
         return image_tensor, target
+
+
+def build_category_id_map(coco_categories, model_categories):
+    dataset_id_to_name = {cat["id"]: cat["name"].strip().lower() for cat in coco_categories if "id" in cat and "name" in cat}
+
+    model_name_to_label = {
+        name.strip().lower(): idx
+        for idx, name in enumerate(model_categories)
+        if name and name != "N/A"
+    }
+
+    if dataset_id_to_name and model_name_to_label:
+        missing_names = sorted({name for name in dataset_id_to_name.values() if name not in model_name_to_label})
+        if missing_names:
+            missing_preview = ", ".join(missing_names[:5])
+            raise ValueError(
+                "Dataset category names are not aligned with model labels. "
+                f"Missing matches for: {missing_preview}"
+            )
+
+        return {dataset_id: model_name_to_label[name] for dataset_id, name in dataset_id_to_name.items()}
+
+    dataset_ids = {cat["id"] for cat in coco_categories if "id" in cat}
+    model_valid_ids = {
+        idx for idx, name in enumerate(model_categories) if name and name != "N/A"
+    }
+
+    if dataset_ids and dataset_ids.issubset(model_valid_ids):
+        return {dataset_id: dataset_id for dataset_id in dataset_ids}
+
+    raise ValueError(
+        "Unable to build category-id mapping from dataset categories to model label space. "
+        "Provide COCO categories with names that match the model's category names."
+    )
 
 
 def collate_fn(batch):
@@ -87,12 +122,25 @@ def evaluate_map(dataset_root=DATASET_ROOT, score_threshold=SCORE_THRESHOLD):
             "Expected COCO-format dataset at dataset/images and dataset/annotations/instances.json"
         )
 
+    with open(annotations_file, "r", encoding="utf-8") as f:
+        coco = json.load(f)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = FasterRCNN_ResNet50_FPN_Weights.DEFAULT
     model = fasterrcnn_resnet50_fpn(weights=weights).to(device)
     model.eval()
 
-    dataset = COCODetectionDataset(images_dir=images_dir, annotations_file=annotations_file, transforms=weights.transforms())
+    category_id_map = build_category_id_map(
+        coco_categories=coco.get("categories", []),
+        model_categories=weights.meta.get("categories", []),
+    )
+
+    dataset = COCODetectionDataset(
+        images_dir=images_dir,
+        coco=coco,
+        transforms=weights.transforms(),
+        category_id_map=category_id_map,
+    )
     data_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
     metric = MeanAveragePrecision(iou_type="bbox")
@@ -129,6 +177,7 @@ def evaluate_map(dataset_root=DATASET_ROOT, score_threshold=SCORE_THRESHOLD):
     split_name = "dataset/images + dataset/annotations/instances.json"
 
     print(f"Model: {model_name}")
+    print(f"Category ID mapping entries: {len(category_id_map)}")
     print(f"Evaluated split: {split_name}")
     print(f"mAP: {results['map'].item():.4f}")
     print(f"mAP50: {results['map_50'].item():.4f}")
